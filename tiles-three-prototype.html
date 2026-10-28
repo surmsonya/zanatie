@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tile Grid</title>
+<style>
+  :root { --bg:#f4f4f2; --panel:#fff; --ink:#111; --mute:#777; --line:#e2e2e2; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.4 -apple-system, system-ui, sans-serif; color:var(--ink); background:var(--bg);
+         display:flex; height:100vh; overflow:hidden; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; padding:24px; min-width:0; }
+  #stage canvas { max-width:100%; max-height:100%; box-shadow:0 2px 20px rgba(0,0,0,.08); }
+  aside { width:280px; background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:16px; }
+  h1 { font-size:14px; margin:0 0 12px; }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:18px 0 8px; }
+  label { display:block; margin:8px 0; }
+  label span { display:flex; justify-content:space-between; }
+  label span b { font-weight:500; color:var(--mute); }
+  input[type=range] { width:100%; }
+  select, button { font:inherit; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; }
+  button { padding:6px 10px; border:1px solid var(--line); background:#fafafa; border-radius:6px; cursor:pointer; }
+  button:hover { background:#f0f0f0; }
+  button.rec { color:#c00; }
+  .check { display:flex; align-items:center; gap:6px; }
+  @media (max-width:700px) { body { flex-direction:column; height:auto; overflow:auto; }
+    aside { width:auto; border-left:0; border-top:1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<aside>
+  <h1>Tile Grid</h1>
+
+  <h2>Источник</h2>
+  <div class="row">
+    <button id="camBtn">Камера</button>
+    <button id="fileBtn">Фото / видео</button>
+    <input id="file" type="file" accept="image/*,video/*" hidden>
+  </div>
+  <label class="check"><input id="mirror" type="checkbox"> Зеркалить</label>
+
+  <h2>Сетка</h2>
+  <label><span>Колонки <b id="colsV"></b></span><input id="cols" type="range" min="1" max="16" value="5"></label>
+  <label><span>Ряды <b id="rowsV"></b></span><input id="rows" type="range" min="1" max="16" value="7"></label>
+  <label><span>Видимых тайлов <b id="densityV"></b></span><input id="density" type="range" min="0" max="1" step="0.01" value="0.6"></label>
+  <label>Паттерн
+    <select id="pattern">
+      <option value="random">Случайный</option>
+      <option value="checker">Шахматка</option>
+      <option value="all">Все тайлы</option>
+    </select>
+  </label>
+  <label><span>Зазор <b id="gapV"></b></span><input id="gap" type="range" min="0" max="0.2" step="0.005" value="0"></label>
+  <label class="check"><input id="edges" type="checkbox" checked> Тонкие обводки</label>
+  <div class="row"><button id="seed">Перемешать</button></div>
+
+  <h2>3D</h2>
+  <label><span>Поворот Y <b id="rotYV"></b></span><input id="rotY" type="range" min="-80" max="80" value="-28"></label>
+  <label><span>Поворот X <b id="rotXV"></b></span><input id="rotX" type="range" min="-60" max="60" value="4"></label>
+  <label><span>Перспектива (FOV) <b id="fovV"></b></span><input id="fov" type="range" min="10" max="100" value="45"></label>
+  <label><span>Глубина колонок <b id="depthV"></b></span><input id="depth" type="range" min="-1" max="1" step="0.01" value="0.15"></label>
+  <label><span>Сдвиг колонок по Y <b id="jitterV"></b></span><input id="jitter" type="range" min="0" max="1" step="0.01" value="0.15"></label>
+  <label><span>Масштаб <b id="zoomV"></b></span><input id="zoom" type="range" min="0.4" max="1.6" step="0.01" value="0.9"></label>
+  <label class="check"><input id="wobble" type="checkbox"> Покачивание</label>
+
+  <h2>Кадр</h2>
+  <label>Формат
+    <select id="ratio">
+      <option value="0.8">4:5</option>
+      <option value="1">1:1</option>
+      <option value="0.5625">9:16</option>
+      <option value="1.7778">16:9</option>
+    </select>
+  </label>
+  <label>Фон <input id="bg" type="color" value="#ffffff"></label>
+
+  <h2>Экспорт</h2>
+  <div class="row">
+    <button id="png">PNG</button>
+    <button id="rec" class="rec">● Запись видео</button>
+  </div>
+</aside>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const P = {};
+const ids = ['cols','rows','density','pattern','gap','edges','rotY','rotX','fov','depth','jitter','zoom','wobble','ratio','bg','mirror'];
+function readParams() {
+  for (const id of ids) {
+    const el = $(id);
+    P[id] = el.type === 'checkbox' ? el.checked : (el.type === 'range' || id === 'ratio') ? +el.value : el.value;
+    const v = $(id + 'V'); if (v) v.textContent = el.value;
+  }
+}
+let seed = 7;
+
+// --- three.js setup ---
+const OUT_W = 1080;
+const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.setPixelRatio(1);
+$('stage').appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+const group = new THREE.Group();
+scene.add(group);
+
+// --- source: generated placeholder until camera/file chosen ---
+let srcAspect = 4/3;
+let texture = makePlaceholder();
+let video = null;
+
+function makePlaceholder() {
+  const c = document.createElement('canvas'); c.width = 800; c.height = 600;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0,0,800,600);
+  grad.addColorStop(0,'#222'); grad.addColorStop(.5,'#c9a28f'); grad.addColorStop(1,'#eee');
+  g.fillStyle = grad; g.fillRect(0,0,800,600);
+  g.fillStyle = 'rgba(0,0,0,.6)'; g.font = 'bold 90px system-ui'; g.textAlign = 'center';
+  g.fillText('камера / фото', 400, 330);
+  const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; return t;
+}
+
+function setTexture(t, aspect) {
+  if (texture) texture.dispose();
+  texture = t; texture.encoding = THREE.sRGBEncoding;
+  texture.minFilter = THREE.LinearFilter;
+  srcAspect = aspect;
+  build();
+}
+
+function stopVideo() {
+  if (video) { if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop()); video.pause(); video = null; }
+}
+
+function useVideo(v) {
+  video = v;
+  v.addEventListener('loadedmetadata', () => setTexture(new THREE.VideoTexture(v), v.videoWidth / v.videoHeight), { once:true });
+  v.play();
+}
+
+$('camBtn').onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{ width:1280, height:720 }, audio:false });
+    stopVideo();
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.srcObject = stream;
+    $('mirror').checked = true;
+    useVideo(v);
+  } catch (e) { alert('Нет доступа к камере: ' + e.message); }
+};
+$('fileBtn').onclick = () => $('file').click();
+$('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const url = URL.createObjectURL(f);
+  stopVideo();
+  $('mirror').checked = false;
+  if (f.type.startsWith('video')) {
+    const v = document.createElement('video');
+    v.muted = true; v.loop = true; v.playsInline = true; v.src = url;
+    useVideo(v);
+  } else {
+    new THREE.TextureLoader().load(url, t => setTexture(t, t.image.width / t.image.height));
+  }
+  readParams();
+};
+
+// --- grid ---
+function rng(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+const edgeMat = new THREE.LineBasicMaterial({ color:0x999999, transparent:true, opacity:.7 });
+
+function build() {
+  readParams();
+  group.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material && o.material !== edgeMat) o.material.dispose(); });
+  group.clear();
+
+  const H = 2, W = H * srcAspect;
+  const tw = W / P.cols, th = H / P.rows;
+  const rand = rng(seed);
+  const colShift = Array.from({ length:P.cols }, () => (rand() - .5) * 2 * P.jitter * th * 2);
+  const mat = new THREE.MeshBasicMaterial({ map:texture, side:THREE.DoubleSide });
+
+  for (let c = 0; c < P.cols; c++) {
+    for (let r = 0; r < P.rows; r++) {
+      const roll = rand();
+      const show = P.pattern === 'all' ? true
+                 : P.pattern === 'checker' ? ((c + r) % 2 === 0 || roll < P.density - .5)
+                 : roll < P.density;
+      if (!show) continue;
+
+      const geo = new THREE.PlaneGeometry(tw * (1 - P.gap), th * (1 - P.gap));
+      // map this tile to its own slice of the source
+      let u0 = c / P.cols, u1 = (c + 1) / P.cols;
+      if (P.mirror) { u0 = 1 - u0; u1 = 1 - u1; }
+      const v1 = 1 - r / P.rows, v0 = 1 - (r + 1) / P.rows;
+      const uv = geo.attributes.uv;
+      uv.setXY(0, u0, v1); uv.setXY(1, u1, v1); uv.setXY(2, u0, v0); uv.setXY(3, u1, v0);
+
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(-W/2 + tw*(c+.5), H/2 - th*(r+.5) + colShift[c], (c - (P.cols-1)/2) * P.depth);
+      if (P.edges) m.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), edgeMat));
+      group.add(m);
+    }
+  }
+  layout();
+}
+
+function layout() {
+  const w = OUT_W, h = Math.round(OUT_W / P.ratio);
+  renderer.setSize(w, h, false);
+  renderer.domElement.style.aspectRatio = w + '/' + h;
+  renderer.domElement.style.width = P.ratio >= 1 ? '100%' : 'auto';
+  renderer.domElement.style.height = P.ratio >= 1 ? 'auto' : '100%';
+  camera.aspect = P.ratio;
+  camera.fov = P.fov;
+  const W = 2 * srcAspect, need = Math.max(2, W / P.ratio) / 2;
+  camera.position.set(0, 0, need / Math.tan(THREE.MathUtils.degToRad(P.fov / 2)) / P.zoom);
+  camera.lookAt(0, 0, 0);
+  camera.updateProjectionMatrix();
+  renderer.setClearColor(P.bg);
+}
+
+// --- controls ---
+for (const id of ids) $(id).addEventListener('input', build);
+$('seed').onclick = () => { seed = Math.random() * 1e9 | 0; build(); };
+
+$('png').onclick = () => {
+  renderer.render(scene, camera);
+  const a = document.createElement('a');
+  a.download = 'tiles.png'; a.href = renderer.domElement.toDataURL('image/png'); a.click();
+};
+
+let recorder = null;
+$('rec').onclick = () => {
+  if (recorder) { recorder.stop(); return; }
+  const chunks = [];
+  const type = ['video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find(t => MediaRecorder.isTypeSupported(t));
+  recorder = new MediaRecorder(renderer.domElement.captureStream(30), { mimeType:type, videoBitsPerSecond:8e6 });
+  recorder.ondataavailable = e => chunks.push(e.data);
+  recorder.onstop = () => {
+    const a = document.createElement('a');
+    a.download = 'tiles.' + (type.includes('mp4') ? 'mp4' : 'webm');
+    a.href = URL.createObjectURL(new Blob(chunks, { type })); a.click();
+    recorder = null; $('rec').textContent = '● Запись видео';
+  };
+  recorder.start(); $('rec').textContent = '■ Стоп';
+};
+
+// --- loop ---
+function tick(t) {
+  const wob = P.wobble ? Math.sin(t / 1400) * 8 : 0;
+  group.rotation.y = THREE.MathUtils.degToRad(P.rotY + wob);
+  group.rotation.x = THREE.MathUtils.degToRad(P.rotX + (P.wobble ? Math.cos(t / 1900) * 3 : 0));
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+build();
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
